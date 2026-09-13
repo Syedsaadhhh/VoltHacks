@@ -47,8 +47,10 @@ export class LaptopMicAnalyzer {
       };
 
       this.analyserNode = this.ctx.createAnalyser();
-      this.analyserNode.fftSize = 2048;
-      this.analyserNode.smoothingTimeConstant = 0.75;
+      this.analyserNode.fftSize = 4096;
+      this.analyserNode.smoothingTimeConstant = 0.62;
+      this.analyserNode.minDecibels = -100;
+      this.analyserNode.maxDecibels = -30;
 
       this.sourceNode = this.ctx.createMediaStreamSource(this.stream);
       this.sourceNode.connect(this.analyserNode);

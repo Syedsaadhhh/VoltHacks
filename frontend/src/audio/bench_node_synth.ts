@@ -321,28 +321,36 @@ export class BenchNodeAudioEngine {
     this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
     this.masterGain.gain.linearRampToValueAtTime(0.0, now + 0.05);
 
+    // Capture the old graph before clearing fields. startNominal may create a
+    // new graph immediately; the delayed cleanup must never stop those nodes.
+    const oldFundamental = this.fundamentalOsc;
+    const oldToothPass = this.toothPassOsc;
+    const oldNoise = this.noiseSource;
+    const oldChatter = this.chatterOsc;
+    const oldLfo = this.lfoOsc;
+
+    this.fundamentalOsc = null;
+    this.toothPassOsc = null;
+    this.noiseSource = null;
+    this.chatterOsc = null;
+    this.lfoOsc = null;
+
     setTimeout(() => {
       try {
-        this.fundamentalOsc?.stop();
+        oldFundamental?.stop();
       } catch {}
       try {
-        this.toothPassOsc?.stop();
+        oldToothPass?.stop();
       } catch {}
       try {
-        this.noiseSource?.stop();
+        oldNoise?.stop();
       } catch {}
       try {
-        this.chatterOsc?.stop();
+        oldChatter?.stop();
       } catch {}
       try {
-        this.lfoOsc?.stop();
+        oldLfo?.stop();
       } catch {}
-
-      this.fundamentalOsc = null;
-      this.toothPassOsc = null;
-      this.noiseSource = null;
-      this.chatterOsc = null;
-      this.lfoOsc = null;
     }, 60);
 
     this.activeProfile = "IDLE";

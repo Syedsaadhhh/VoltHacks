@@ -159,39 +159,35 @@ def test_websocket_bad_version_rejected():
     client = TestClient(app)
     room_id = "HUSH-BAD-VER"
 
-    with pytest.raises(Exception):
-        with client.websocket_connect(f"/ws/{room_id}") as ws:
-            ws.send_json({
-                "version": "0.8.0",
-                "type": "HELLO",
-                "room_id": room_id,
-                "client_id": "bad-client",
-                "role": "operator",
-                "timestamp": time.time(),
-            })
-            err = ws.receive_json()
-            assert err["type"] == "ERROR"
-            assert err["code"] == "VERSION_MISMATCH"
-            ws.receive_json()
+    with client.websocket_connect(f"/ws/{room_id}") as ws:
+        ws.send_json({
+            "version": "0.8.0",
+            "type": "HELLO",
+            "room_id": room_id,
+            "client_id": "bad-client",
+            "role": "operator",
+            "timestamp": time.time(),
+        })
+        err = ws.receive_json()
+        assert err["type"] == "ERROR"
+        assert err["code"] == "VERSION_MISMATCH"
 
 def test_websocket_wrong_room_rejected():
     client = TestClient(app)
     room_id = "HUSH-CORRECT-ROOM"
 
-    with pytest.raises(Exception):
-        with client.websocket_connect(f"/ws/{room_id}") as ws:
-            ws.send_json({
-                "version": PROTOCOL_VERSION,
-                "type": "HELLO",
-                "room_id": "HUSH-OTHER-ROOM",
-                "client_id": "bad-client",
-                "role": "operator",
-                "timestamp": time.time(),
-            })
-            err = ws.receive_json()
-            assert err["type"] == "ERROR"
-            assert err["code"] == "ROOM_MISMATCH"
-            ws.receive_json()
+    with client.websocket_connect(f"/ws/{room_id}") as ws:
+        ws.send_json({
+            "version": PROTOCOL_VERSION,
+            "type": "HELLO",
+            "room_id": "HUSH-OTHER-ROOM",
+            "client_id": "bad-client",
+            "role": "operator",
+            "timestamp": time.time(),
+        })
+        err = ws.receive_json()
+        assert err["type"] == "ERROR"
+        assert err["code"] == "ROOM_MISMATCH"
 
 def test_websocket_invalid_role_command_and_bounds():
     client = TestClient(app)

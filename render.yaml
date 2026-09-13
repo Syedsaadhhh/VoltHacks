@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: cuthush
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PROTOCOL_VERSION
+        value: 1.0.0
+      - key: CORS_ORIGINS
+        value: https://cuthush.onrender.com

@@ -35,7 +35,7 @@ export const OpeningView: React.FC<Props> = ({ onStartRoom }) => {
       <div className="opening-card">
         <div className="brand-badge">
           <Activity size={16} className="text-cyan" />
-          <span>VOLTHACKS 2026 • RUN 1</span>
+          <span>VOLTHACKS 2026 • LIVE CONTROL PROOF</span>
         </div>
 
         <h1 className="opening-title">
@@ -50,12 +50,12 @@ export const OpeningView: React.FC<Props> = ({ onStartRoom }) => {
         <div className="truth-card">
           <div className="truth-header">
             <ShieldCheck size={16} className="text-amber" />
-            <span className="font-semibold text-xs text-amber">RUN 1 TRUTH & BOUNDARY NOTICE</span>
+            <span className="font-semibold text-xs text-amber">TRUTH & BOUNDARY NOTICE</span>
           </div>
           <ul className="truth-list text-xs text-secondary">
             <li>• Phone is labeled <strong className="text-amber">BENCH MACHINE NODE</strong> (audio simulator proxy, not a real CNC machine).</li>
             <li>• Laptop microphone is labeled <strong className="text-cyan">LIVE_MIC</strong> with true unadorned hardware settings.</li>
-            <li>• Chatter detection is not asserted yet; this run proves the real two-device physical loop.</li>
+            <li>• Recovery appears only after measured target-band reduction; replay remains explicitly labeled.</li>
           </ul>
         </div>
 
@@ -76,7 +76,7 @@ export const OpeningView: React.FC<Props> = ({ onStartRoom }) => {
             className="btn btn-secondary btn-lg"
           >
             <RotateCcw size={18} />
-            Watch a verified replay (REPLAY_FIXTURE)
+            Run the same-seed judge proof (REPLAY_FIXTURE)
           </button>
         </div>
 

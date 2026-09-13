@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { OpeningView } from "./routes/OpeningView";
-import { OperatorView } from "./routes/OperatorView";
+import { OperatorCell } from "./routes/OperatorCell";
 import { NodeView } from "./routes/NodeView";
 
 export const App: React.FC = () => {
@@ -38,5 +38,5 @@ export const App: React.FC = () => {
     return <NodeView roomCode={room} />;
   }
 
-  return <OperatorView roomCode={room} initialReplay={isReplay} />;
+  return <OperatorCell roomCode={room} initialReplay={isReplay} />;
 };

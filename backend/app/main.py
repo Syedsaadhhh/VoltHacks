@@ -1,7 +1,9 @@
 import time
+from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from .config import CORS_ORIGINS, PROTOCOL_VERSION
 from .protocol import (
@@ -15,9 +17,9 @@ from .protocol import (
 from .rooms import room_manager
 
 app = FastAPI(
-    title="CutHush Run 1 API",
-    description="CutHush Two-Device Physical Loop Platform",
-    version="0.1.0",
+    title="CutHush API",
+    description="Browser hardware-in-the-loop acoustic governor",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -43,7 +45,7 @@ class HealthResponse(BaseModel):
 async def get_health():
     return HealthResponse(
         status="ok",
-        version="0.1.0",
+        version="0.3.0",
         protocol_version=PROTOCOL_VERSION,
         active_rooms=len(room_manager.rooms),
         timestamp=time.time(),
@@ -138,3 +140,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     finally:
         if registered:
             await room_manager.remove_connection(room_id, websocket)
+
+# Production image copies the Vite build here. Mount last so API and WebSocket
+# routes retain precedence.
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")

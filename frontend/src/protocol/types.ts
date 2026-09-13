@@ -70,6 +70,7 @@ export interface InjectInstabilityMessage {
   active: boolean;
   incident_id: string;
   target_freq_hz: number;
+  seed?: number;
   timestamp: number;
 }
 
