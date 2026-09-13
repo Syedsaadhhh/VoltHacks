@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { BenchNodeAudioEngine } from "../audio/bench_node_synth";
 import { PROTOCOL_VERSION, WebSocketMessage } from "../protocol/types";
+import { websocketUrl } from "../backend";
 
 interface Props {
   roomCode: string;
@@ -74,8 +75,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
 
   // WebSocket Lifecycle: depends only on roomCode
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/${roomCode}`;
+    const wsUrl = websocketUrl(`/ws/${roomCode}`);
     let disposed = false;
     let attempt = 0;
     let reconnectTimer: number | undefined;
