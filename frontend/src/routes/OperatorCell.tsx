@@ -7,10 +7,16 @@ import { LivenessMeter } from "../components/LivenessMeter";
 import { PhonePairing } from "../components/PhonePairing";
 import { SpectrumCanvas } from "../components/SpectrumCanvas";
 import { CommandAckMessage, PROTOCOL_VERSION, SystemState, WebSocketMessage } from "../protocol/types";
+import { sha256Hex } from "../proof/integrity";
 
 interface Props { roomCode: string; initialReplay?: boolean; }
 interface EventItem { at: string; message: string; tone: "info" | "success" | "danger"; }
-interface ProofResult { seed: number; offExposureMs: number; onExposureMs: number; reductionDb: number | null; outcome: "PENDING" | "RECOVERED" | "UNRESOLVED"; }
+interface ProofResult { runId: string | null; seed: number; offExposureMs: number; onExposureMs: number; reductionDb: number | null; outcome: "PENDING" | "RECOVERED" | "UNRESOLVED"; }
+interface StoredProof {
+  run_id: string; room_id: string; created_at: string; source: "REPLAY_FIXTURE" | "LIVE_MIC";
+  seed: number; outcome: "RECOVERED" | "UNRESOLVED"; off_exposure_ms: number;
+  on_exposure_ms: number; reduction_db: number | null; previous_digest: string | null; digest: string;
+}
 
 const SEED = 2026;
 const EMPTY: SpectrumMetrics = { dominantHz: 0, targetPower: 1e-12, targetDb: -120, prominenceDb: 0, baselineDeltaDb: 0, instabilityScore: 0, candidate: false };
@@ -34,6 +40,7 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
   const phaseStartedRef = useRef(0);
   const offPeakRef = useRef(0);
   const timersRef = useRef<number[]>([]);
+  const savedRunRef = useRef<string | null>(null);
 
   const [source, setSource] = useState<"live" | "replay">(initialReplay ? "replay" : "live");
   const [systemState, setSystemState] = useState<SystemState>("UNPAIRED");
@@ -49,7 +56,8 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
   const [reductionDb, setReductionDb] = useState<number | null>(null);
   const [lastAck, setLastAck] = useState<CommandAckMessage | null>(null);
   const [events, setEvents] = useState<EventItem[]>([]);
-  const [proof, setProof] = useState<ProofResult>({ seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" });
+  const [proof, setProof] = useState<ProofResult>({ runId: null, seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" });
+  const [capsule, setCapsule] = useState<StoredProof | null>(null);
   const [micSettings, setMicSettings] = useState({ sampleRate: 48000, echoCancellation: undefined as boolean | undefined });
 
   const addEvent = useCallback((message: string, tone: EventItem["tone"] = "info") => {
@@ -77,39 +85,82 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
 
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${roomCode}`);
-    wsRef.current = ws;
-    ws.onopen = () => {
-      setWsConnected(true);
-      ws.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "HELLO", room_id: roomCode, client_id: `op-${Date.now().toString(36)}`, role: "operator", timestamp: Date.now() / 1000 }));
-      addEvent("Operator link established");
+    let disposed = false;
+    let attempt = 0;
+    let reconnectTimer: number | undefined;
+    const connect = () => {
+      if (disposed) return;
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${roomCode}`);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        attempt = 0;
+        setWsConnected(true);
+        ws.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "HELLO", room_id: roomCode, client_id: `op-${Date.now().toString(36)}`, role: "operator", timestamp: Date.now() / 1000 }));
+        addEvent("Operator link established");
+      };
+      ws.onmessage = event => {
+        try {
+          const message: WebSocketMessage = JSON.parse(event.data);
+          if (message.type === "PAIR") {
+            const paired = message.peers.includes("node");
+            setNodePaired(paired);
+            if (paired && stateRef.current === "UNPAIRED") transition("READY", "physical node paired");
+            if (!paired && stateRef.current !== "SAFE_HOLD" && sourceRef.current === "live") transition("UNPAIRED", "physical node disconnected");
+          } else if (message.type === "HEARTBEAT") setHeartbeatSeq(message.seq);
+          else if (message.type === "COMMAND_ACK") {
+            commandPendingRef.current = false;
+            setLastAck(message);
+            addEvent(`Command acknowledged · ${Math.round(performance.now() - commandSentAtRef.current)} ms RTT`, "success");
+            verifyFramesRef.current = 0;
+            recoveryHitsRef.current = 0;
+            transition("VERIFYING", "node applied bounded mitigation");
+          } else if (message.type === "SAFE_HOLD") transition("SAFE_HOLD", message.reason);
+          else if (message.type === "NODE_READY") addEvent("Bench node armed", "success");
+          else if (message.type === "START_PROFILE") transition("NOMINAL", "physical nominal profile started");
+          else if (message.type === "INJECT_INSTABILITY") addEvent(`Physical incident ${message.incident_id} injected`);
+          else if (message.type === "ERROR") addEvent(`${message.code}: ${message.message}`, "danger");
+        } catch { addEvent("Rejected malformed server message", "danger"); }
+      };
+      ws.onclose = () => {
+        setWsConnected(false);
+        setNodePaired(false);
+        if (sourceRef.current === "live" && stateRef.current !== "SAFE_HOLD") transition("UNPAIRED", "operator link lost");
+        if (!disposed && attempt < 4) {
+          const delay = Math.min(4000, 500 * 2 ** attempt++);
+          addEvent(`Link retry ${attempt}/4 in ${delay} ms`);
+          reconnectTimer = window.setTimeout(connect, delay);
+        } else if (!disposed) addEvent("Link retry budget exhausted", "danger");
+      };
     };
-    ws.onmessage = event => {
-      try {
-        const message: WebSocketMessage = JSON.parse(event.data);
-        if (message.type === "PAIR") {
-          const paired = message.peers.includes("node");
-          setNodePaired(paired);
-          if (paired && stateRef.current === "UNPAIRED") transition("READY", "physical node paired");
-          if (!paired && stateRef.current !== "SAFE_HOLD") transition("UNPAIRED", "physical node disconnected");
-        } else if (message.type === "HEARTBEAT") setHeartbeatSeq(message.seq);
-        else if (message.type === "COMMAND_ACK") {
-          commandPendingRef.current = false;
-          setLastAck(message);
-          addEvent(`Command acknowledged · ${Math.round(performance.now() - commandSentAtRef.current)} ms RTT`, "success");
-          verifyFramesRef.current = 0;
-          recoveryHitsRef.current = 0;
-          transition("VERIFYING", "node applied bounded mitigation");
-        } else if (message.type === "SAFE_HOLD") transition("SAFE_HOLD", message.reason);
-        else if (message.type === "NODE_READY") addEvent("Bench node armed", "success");
-        else if (message.type === "START_PROFILE") transition("NOMINAL", "physical nominal profile started");
-        else if (message.type === "INJECT_INSTABILITY") addEvent(`Physical incident ${message.incident_id} injected`);
-        else if (message.type === "ERROR") addEvent(`${message.code}: ${message.message}`, "danger");
-      } catch { addEvent("Rejected malformed server message", "danger"); }
-    };
-    ws.onclose = () => { setWsConnected(false); setNodePaired(false); };
-    return () => { ws.close(); wsRef.current = null; };
+    connect();
+    return () => { disposed = true; if (reconnectTimer) window.clearTimeout(reconnectTimer); wsRef.current?.close(); wsRef.current = null; };
   }, [addEvent, roomCode, transition]);
+
+  useEffect(() => {
+    if (proof.outcome === "PENDING" || !proof.runId || savedRunRef.current === proof.runId) return;
+    savedRunRef.current = proof.runId;
+    const persist = async () => {
+      const previousDigest = window.localStorage.getItem("cuthush-proof-head");
+      const unsigned = {
+        run_id: proof.runId!, room_id: roomCode, created_at: new Date().toISOString(),
+        source: sourceRef.current === "replay" ? "REPLAY_FIXTURE" as const : "LIVE_MIC" as const,
+        seed: proof.seed, outcome: proof.outcome, off_exposure_ms: proof.offExposureMs,
+        on_exposure_ms: proof.onExposureMs, reduction_db: proof.reductionDb,
+        previous_digest: previousDigest,
+      };
+      const digest = await sha256Hex(unsigned);
+      const artifact: StoredProof = { ...unsigned, digest };
+      setCapsule(artifact);
+      window.localStorage.setItem("cuthush-latest-proof", JSON.stringify(artifact));
+      window.localStorage.setItem("cuthush-proof-head", digest);
+      window.history.replaceState({}, "", `/cell/${encodeURIComponent(roomCode)}?source=${sourceRef.current}`);
+      try {
+        const response = await fetch("/api/proofs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(artifact) });
+        addEvent(response.ok ? `Proof persisted · ${digest.slice(0, 10)}…` : "Proof saved locally; server persistence unavailable", response.ok ? "success" : "danger");
+      } catch { addEvent("Proof saved locally; server persistence unavailable", "danger"); }
+    };
+    void persist();
+  }, [addEvent, proof, roomCode]);
 
   useEffect(() => () => {
     micRef.current.stop();
@@ -171,12 +222,12 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
         if (recoveryHitsRef.current >= 8) {
           const onExposureMs = Math.round(performance.now() - phaseStartedRef.current);
           transition("RECOVERED", `${measured.toFixed(1)} dB reduction sustained`);
-          setProof(previous => ({ ...previous, onExposureMs, reductionDb: measured, outcome: "RECOVERED" }));
+          setProof(previous => ({ ...previous, runId: `run-${Date.now().toString(36)}`, onExposureMs, reductionDb: measured, outcome: "RECOVERED" }));
           proofPhaseRef.current = "NONE";
         } else if (verifyFramesRef.current >= 32) {
           const onExposureMs = Math.round(performance.now() - phaseStartedRef.current);
           transition("UNRESOLVED", "6 dB recovery requirement not sustained");
-          setProof(previous => ({ ...previous, onExposureMs, reductionDb: measured, outcome: "UNRESOLVED" }));
+          setProof(previous => ({ ...previous, runId: `run-${Date.now().toString(36)}`, onExposureMs, reductionDb: measured, outcome: "UNRESOLVED" }));
           proofPhaseRef.current = "NONE";
         }
       }
@@ -215,7 +266,9 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
     setMode("replay");
     setGovernor(false);
     replayRef.current.reset(SEED);
-    setProof({ seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" });
+    savedRunRef.current = null;
+    setCapsule(null);
+    setProof({ runId: null, seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" });
     setReductionDb(null);
     proofPhaseRef.current = "NONE";
     offPeakRef.current = 0;
@@ -242,14 +295,12 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
   };
 
   const exportCapsule = async () => {
-    const payload = { product: "CutHush", protocol: PROTOCOL_VERSION, roomCode, source: source === "replay" ? "REPLAY_FIXTURE" : "LIVE_MIC", state: systemState, proof, metrics: { dominantHz: metrics.dominantHz, baselineDeltaDb: Number(metrics.baselineDeltaDb.toFixed(2)), prominenceDb: Number(metrics.prominenceDb.toFixed(2)) }, exportedAt: new Date().toISOString() };
-    const canonical = JSON.stringify(payload);
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
-    const sha256 = Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("");
-    const blob = new Blob([JSON.stringify({ ...payload, integrity: { algorithm: "SHA-256", digest: sha256, claim: "tamper-evident export" } }, null, 2)], { type: "application/json" });
+    if (!capsule) { addEvent("Complete Judge Mode before exporting evidence", "danger"); return; }
+    const payload = { product: "CutHush", protocol: PROTOCOL_VERSION, ...capsule, integrity: { algorithm: "SHA-256", claim: "hash-chained, tamper-evident export" }, metrics: { dominantHz: metrics.dominantHz, baselineDeltaDb: Number(metrics.baselineDeltaDb.toFixed(2)), prominenceDb: Number(metrics.prominenceDb.toFixed(2)) } };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `cuthush-${roomCode}-${SEED}.json`;
+    link.download = `cuthush-${capsule.run_id}.json`;
     link.click();
     URL.revokeObjectURL(link.href);
   };
@@ -264,8 +315,8 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
       {micError && <div className="error-alert"><AlertTriangle size={15} />{micError}</div>}
       <SpectrumCanvas getFrequencyData={getFrequencyData} sampleRate={source === "live" ? micSettings.sampleRate : 48000} isReplay={source === "replay"} />
       <div className="metric-band"><div><span>DOMINANT</span><strong>{metrics.dominantHz} Hz</strong></div><div><span>BASELINE Δ</span><strong>{metrics.baselineDeltaDb.toFixed(1)} dB</strong></div><div><span>PROMINENCE</span><strong>{metrics.prominenceDb.toFixed(1)} dB</strong></div><div><span>PERSISTENCE</span><strong>{persistenceLabel}</strong></div><div><span>INSTABILITY</span><strong>{metrics.instabilityScore.toFixed(0)}/100</strong></div><div><span>RECOVERY</span><strong>{reductionDb === null ? "—" : `${reductionDb.toFixed(1)} dB`}</strong></div></div>
-      <div className="proof-surface"><div className="proof-heading"><div><p className="eyebrow">COUNTERFACTUAL PROOF</p><h2>Same incident. Different outcome.</h2></div><button onClick={exportCapsule} className="btn btn-ghost btn-sm"><Download size={14} /> Export Run Capsule</button></div><div className="proof-columns"><div className="proof-column"><span>GOVERNOR OFF</span><strong>{proof.offExposureMs ? `${proof.offExposureMs} ms` : "WAITING"}</strong><small>instability exposure · seed #{proof.seed}</small></div><div className={`proof-column proof-outcome ${proof.outcome === "RECOVERED" ? "is-recovered" : ""}`}><span>GOVERNOR ON</span><strong>{proof.outcome}</strong><small>{proof.reductionDb === null ? "measurement pending" : `${proof.reductionDb.toFixed(1)} dB measured reduction · ${proof.onExposureMs} ms exposure`}</small></div></div></div>
+      <div className="proof-surface"><div className="proof-heading"><div><p className="eyebrow">JUDGE MODE / COUNTERFACTUAL PROOF</p><h2>Same incident. Different outcome.</h2></div><div className="proof-actions"><button onClick={exportCapsule} disabled={!capsule} className="btn btn-ghost btn-sm"><Download size={14} /> Export Run Capsule</button>{capsule && <a href={`/proof/${capsule.run_id}`} className="btn btn-secondary btn-sm">Open proof</a>}</div></div><div className="proof-columns"><div className="proof-column"><span>GOVERNOR OFF</span><strong>{proof.offExposureMs ? `${proof.offExposureMs} ms` : "WAITING"}</strong><small>instability exposure · seed #{proof.seed}</small></div><div className={`proof-column proof-outcome ${proof.outcome === "RECOVERED" ? "is-recovered" : ""}`}><span>GOVERNOR ON</span><strong>{proof.outcome}</strong><small>{proof.reductionDb === null ? "measurement pending" : `${proof.reductionDb.toFixed(1)} dB measured reduction · ${proof.onExposureMs} ms exposure`}</small></div></div>{capsule && <p className="proof-hash">SHA-256 {capsule.digest}</p>}</div>
     </div><aside className="instrument-side"><PhonePairing roomCode={roomCode} /><section className="card source-card"><div className="card-header"><span className="card-title">SIGNAL SOURCE</span><ShieldCheck size={15} className="text-amber" /></div><LivenessMeter level={liveness} sourceLabel={source === "replay" ? "REPLAY_FIXTURE" : micActive ? "LIVE_MIC" : "DISCONNECTED"} isLive={source === "replay" || micActive} /><div className="source-facts"><span>Sample rate <b>{source === "replay" ? 48000 : micSettings.sampleRate} Hz</b></span><span>Echo cancel <b>{micSettings.echoCancellation === undefined ? "reported on grant" : micSettings.echoCancellation ? "browser forced" : "requested off"}</b></span><span>Seed <b>#{SEED}</b></span></div></section><section className="card event-card"><div className="card-header"><div className="flex-center gap-2"><Terminal size={14} className="text-cyan" /><span className="card-title">EVIDENCE TIMELINE</span></div>{lastAck && <CheckCircle2 size={15} className="text-green" />}</div><div className="event-list">{events.length === 0 && <p className="empty-state">Awaiting a measured event.</p>}{events.map((item, index) => <div className={`event-row event-${item.tone}`} key={`${item.at}-${index}`}><span className="event-time">{item.at}</span><span>{item.message}</span></div>)}</div></section></aside></section>
-    <footer className="truth-footer"><Activity size={14} /><span>Bench audio proxy—not field validation on a CNC machine. Green appears only after measured recovery.</span><button onClick={() => { replayRef.current.reset(SEED); setReductionDb(null); setProof({ seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" }); transition(nodePaired ? "READY" : "UNPAIRED", "test cell reset"); }} className="btn btn-ghost btn-xs"><RotateCcw size={12} /> Reset</button></footer>
+    <footer className="truth-footer"><Activity size={14} /><span>Bench audio proxy—not field validation on a CNC machine. Green appears only after measured recovery.</span><a href="/methodology" className="btn btn-ghost btn-xs">Method</a><button onClick={() => { replayRef.current.reset(SEED); setReductionDb(null); savedRunRef.current = null; setCapsule(null); setProof({ runId: null, seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" }); transition(nodePaired ? "READY" : "UNPAIRED", "test cell reset"); }} className="btn btn-ghost btn-xs"><RotateCcw size={12} /> Reset</button></footer>
   </main>;
 };

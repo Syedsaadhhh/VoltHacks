@@ -18,6 +18,8 @@ class Room:
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.heartbeat_seq = 0
         self.node_armed = False
+        self.seen_command_ids: set[str] = set()
+        self.command_order: list[str] = []
 
     @property
     def is_paired(self) -> bool:
@@ -30,6 +32,18 @@ class Room:
         if self.node_ws:
             peers.append("node")
         return peers
+
+    def accept_command(self, command_id: str, timestamp: float) -> tuple[bool, str]:
+        if time.time() - timestamp > 5:
+            return False, "STALE_COMMAND"
+        if command_id in self.seen_command_ids:
+            return False, "DUPLICATE_COMMAND"
+        self.seen_command_ids.add(command_id)
+        self.command_order.append(command_id)
+        if len(self.command_order) > 256:
+            expired = self.command_order.pop(0)
+            self.seen_command_ids.discard(expired)
+        return True, ""
 
     async def broadcast(self, message_dict: dict, exclude: Optional[WebSocket] = None):
         recipients = []
@@ -112,9 +126,21 @@ class RoomManager:
     async def register_connection(self, room_id: str, role: Role, ws: WebSocket) -> Room:
         room = self.get_or_create_room(room_id)
         if role == Role.OPERATOR:
+            previous = room.operator_ws
             room.operator_ws = ws
+            if previous and previous is not ws:
+                try:
+                    await previous.close(code=1000, reason="operator replaced")
+                except Exception:
+                    pass
         elif role == Role.NODE:
+            previous = room.node_ws
             room.node_ws = ws
+            if previous and previous is not ws:
+                try:
+                    await previous.close(code=1000, reason="node replaced")
+                except Exception:
+                    pass
 
         room.sync_heartbeat()
 

@@ -23,7 +23,7 @@ export const PhonePairing: React.FC<Props> = ({ roomCode }) => {
   const [draft, setDraft] = useState(stored ?? automatic ?? "http://192.168.1.10:5173");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const nodeUrl = useMemo(() => origin ? `${origin}/?room=${encodeURIComponent(roomCode)}&role=node` : null, [origin, roomCode]);
+  const nodeUrl = useMemo(() => origin ? `${origin}/node/${encodeURIComponent(roomCode)}` : null, [origin, roomCode]);
 
   useEffect(() => {
     if (!canvasRef.current || !nodeUrl) return;

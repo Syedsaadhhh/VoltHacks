@@ -27,6 +27,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
   const engineRef = useRef<BenchNodeAudioEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const profileRef = useRef<"IDLE" | "NOMINAL" | "INSTABILITY" | "MITIGATED" | "SAFE_HOLD">("IDLE");
+  const processedCommandsRef = useRef(new Set<string>());
 
   // Keep profileRef synchronized with profile state to eliminate stale closures
   useEffect(() => {
@@ -75,64 +76,43 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/${roomCode}`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setWsConnected(true);
-      ws.send(
-        JSON.stringify({
-          version: PROTOCOL_VERSION,
-          type: "HELLO",
-          room_id: roomCode,
-          client_id: `node-${Date.now().toString(36)}`,
-          role: "node",
-          timestamp: Date.now() / 1000,
-        })
-      );
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg: WebSocketMessage = JSON.parse(event.data);
-        if (msg.type === "HEARTBEAT") {
-          engineRef.current?.feedHeartbeat();
-        } else if (msg.type === "MITIGATION_COMMAND") {
-          if (engineRef.current) {
-            const res = engineRef.current.applyMitigation(
-              msg.reduction_ratio,
-              msg.ramp_ms,
-              msg.dither_hz
-            );
+    let disposed = false;
+    let attempt = 0;
+    let reconnectTimer: number | undefined;
+    const connect = () => {
+      if (disposed) return;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        attempt = 0;
+        setWsConnected(true);
+        ws.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "HELLO", room_id: roomCode, client_id: `node-${Date.now().toString(36)}`, role: "node", timestamp: Date.now() / 1000 }));
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg: WebSocketMessage = JSON.parse(event.data);
+          if (msg.type === "HEARTBEAT") engineRef.current?.feedHeartbeat();
+          else if (msg.type === "MITIGATION_COMMAND" && engineRef.current) {
+            if (processedCommandsRef.current.has(msg.command_id)) return;
+            processedCommandsRef.current.add(msg.command_id);
+            if (processedCommandsRef.current.size > 256) {
+              const oldest = processedCommandsRef.current.values().next().value as string | undefined;
+              if (oldest) processedCommandsRef.current.delete(oldest);
+            }
+            const res = engineRef.current.applyMitigation(msg.reduction_ratio, msg.ramp_ms, msg.dither_hz);
             setProfile("MITIGATED");
             setLastCommandTime(new Date().toLocaleTimeString());
-
-            ws.send(
-              JSON.stringify({
-                version: PROTOCOL_VERSION,
-                type: "COMMAND_ACK",
-                room_id: roomCode,
-                command_id: msg.command_id,
-                applied: res.applied,
-                state_after: "MITIGATED",
-                latency_ms: res.latencyMs,
-                timestamp: Date.now() / 1000,
-              })
-            );
+            ws.send(JSON.stringify({ version: PROTOCOL_VERSION, type: "COMMAND_ACK", room_id: roomCode, command_id: msg.command_id, applied: res.applied, state_after: "MITIGATED", latency_ms: res.latencyMs, timestamp: Date.now() / 1000 }));
           }
-        }
-      } catch (err) {
-        console.error("Node WS error:", err);
-      }
+        } catch (err) { console.error("Node WS error:", err); }
+      };
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (!disposed && attempt < 4) reconnectTimer = window.setTimeout(connect, Math.min(4000, 500 * 2 ** attempt++));
+      };
     };
-
-    ws.onclose = () => {
-      setWsConnected(false);
-    };
-
-    return () => {
-      ws.close();
-    };
+    connect();
+    return () => { disposed = true; if (reconnectTimer) window.clearTimeout(reconnectTimer); wsRef.current?.close(); };
   }, [roomCode]);
 
   const handleArmNode = async () => {
