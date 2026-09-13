@@ -139,12 +139,13 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
   useEffect(() => {
     if (proof.outcome === "PENDING" || !proof.runId || savedRunRef.current === proof.runId) return;
     savedRunRef.current = proof.runId;
+    const finalOutcome: "RECOVERED" | "UNRESOLVED" = proof.outcome;
     const persist = async () => {
       const previousDigest = window.localStorage.getItem("cuthush-proof-head");
       const unsigned = {
         run_id: proof.runId!, room_id: roomCode, created_at: new Date().toISOString(),
         source: sourceRef.current === "replay" ? "REPLAY_FIXTURE" as const : "LIVE_MIC" as const,
-        seed: proof.seed, outcome: proof.outcome, off_exposure_ms: proof.offExposureMs,
+        seed: proof.seed, outcome: finalOutcome, off_exposure_ms: proof.offExposureMs,
         on_exposure_ms: proof.onExposureMs, reduction_db: proof.reductionDb,
         previous_digest: previousDigest,
       };
