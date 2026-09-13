@@ -1,0 +1,12 @@
+﻿{
+  "source": "BENCH_SIMULATION",
+  "label": "INSTABILITY_PROFILE",
+  "incident_id": "INC-BENCH-001",
+  "instability_freq_hz": 2400.0,
+  "modulation_rate_hz": 15.0,
+  "prominence_above_baseline_db": 18.4,
+  "target_band_hz": [2350.0, 2450.0],
+  "pre_mitigation_target_db": -12.1,
+  "post_mitigation_target_db": -22.3,
+  "reduction_db": 10.2
+}

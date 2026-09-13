@@ -1,0 +1,12 @@
+﻿{
+  "source": "BENCH_SIMULATION",
+  "label": "NOMINAL_MACHINE_PROFILE",
+  "rpm": 12000,
+  "flute_count": 2,
+  "fundamental_hz": 200.0,
+  "tooth_pass_hz": 400.0,
+  "harmonics_hz": [400.0, 800.0, 1200.0, 1600.0, 2000.0],
+  "sample_rate": 48000,
+  "nominal_energy_db": -24.5,
+  "noise_floor_db": -48.2
+}
