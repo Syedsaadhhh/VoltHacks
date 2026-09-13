@@ -23,11 +23,11 @@ export const SpectrumCanvas: React.FC<Props> = ({ getFrequencyData, sampleRate, 
       const height = canvas.height;
 
       // Clear with deep dark slate
-      ctx.fillStyle = "#121316";
+      ctx.fillStyle = "#11110f";
       ctx.fillRect(0, 0, width, height);
 
       // Draw subtle grid lines
-      ctx.strokeStyle = "#22252d";
+      ctx.strokeStyle = "#2d2d27";
       ctx.lineWidth = 1;
       for (let y = 0; y < height; y += 40) {
         ctx.beginPath();
@@ -56,12 +56,12 @@ export const SpectrumCanvas: React.FC<Props> = ({ getFrequencyData, sampleRate, 
         // Color coding
         if (Math.abs(binHz - 2400) < 60) {
           // Instability target band
-          ctx.fillStyle = "#06b6d4"; // signal cyan
+          ctx.fillStyle = "#31c3d9"; // signal cyan
         } else if (Math.abs(binHz - 400) < 40) {
           // Rotational tooth pass proxy
-          ctx.fillStyle = "#f59e0b"; // safety amber
+          ctx.fillStyle = "#f2a900"; // safety amber
         } else {
-          ctx.fillStyle = isReplay ? "#52525b" : "#3b82f6";
+          ctx.fillStyle = isReplay ? "#5f5e54" : "#397f8a";
         }
 
         ctx.fillRect(x, y, Math.max(1, barWidth - 1), barHeight);
@@ -86,11 +86,11 @@ export const SpectrumCanvas: React.FC<Props> = ({ getFrequencyData, sampleRate, 
         }
       };
 
-      drawMarker(400, "HARMONIC", "#f59e0b");
-      drawMarker(2400, "TARGET CHATTER", "#06b6d4");
+      drawMarker(400, "HARMONIC", "#f2a900");
+      drawMarker(2400, "TARGET CHATTER", "#31c3d9");
 
       // Draw baseline axis
-      ctx.fillStyle = "#a1a1aa";
+      ctx.fillStyle = "#a6a69c";
       ctx.font = "10px monospace";
       ctx.fillText("0 Hz", 6, height - 6);
       ctx.fillText("1000 Hz", (1000 / maxDisplayHz) * width - 20, height - 6);

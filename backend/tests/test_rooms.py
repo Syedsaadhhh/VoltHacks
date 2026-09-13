@@ -1,80 +1,119 @@
-﻿import pytest
+import asyncio
 import time
-from fastapi.testclient import TestClient
-from backend.app.main import app
-from backend.app.protocol import PROTOCOL_VERSION
 
-def test_websocket_room_pairing_and_mitigation():
-    client = TestClient(app)
-    room_id = "HUSH-TEST-PAIR"
+from backend.app.protocol import CommandAckMessage, MitigationCommandMessage, Role
+from backend.app.rooms import RoomManager
 
-    with client.websocket_connect(f"/ws/{room_id}") as op_ws:
-        op_ws.send_json({
-            "version": PROTOCOL_VERSION,
-            "type": "HELLO",
-            "room_id": room_id,
-            "client_id": "op-1",
-            "role": "operator",
-            "timestamp": time.time(),
-        })
-        op_pair_msg = op_ws.receive_json()
-        assert op_pair_msg["type"] == "PAIR"
-        assert op_pair_msg["paired"] is False
-        assert op_pair_msg["peers"] == ["operator"]
 
-        with client.websocket_connect(f"/ws/{room_id}") as node_ws:
-            node_ws.send_json({
-                "version": PROTOCOL_VERSION,
-                "type": "HELLO",
-                "room_id": room_id,
-                "client_id": "node-1",
-                "role": "node",
-                "timestamp": time.time(),
-            })
-            node_pair_msg = node_ws.receive_json()
-            assert node_pair_msg["type"] == "PAIR"
-            assert node_pair_msg["paired"] is True
-            assert "operator" in node_pair_msg["peers"]
-            assert "node" in node_pair_msg["peers"]
+class FakeWebSocket:
+    """Single-loop WebSocket double; avoids TestClient cross-portal deadlocks."""
 
-            op_updated_pair = op_ws.receive_json()
-            assert op_updated_pair["type"] == "PAIR"
-            assert op_updated_pair["paired"] is True
+    def __init__(self):
+        self.messages: list[dict] = []
+        self.closed = False
 
-            op_ws.send_json({
-                "version": PROTOCOL_VERSION,
-                "type": "MITIGATION_COMMAND",
-                "room_id": room_id,
-                "command_id": "cmd-xyz",
-                "reduction_ratio": 0.6,
-                "ramp_ms": 200,
-                "dither_hz": 50.0,
-                "reason": "MANUAL_RUN_1",
-                "timestamp": time.time(),
-            })
+    async def send_json(self, payload: dict):
+        self.messages.append(payload)
 
-            node_received_cmd = node_ws.receive_json()
-            while node_received_cmd.get("type") == "HEARTBEAT":
-                node_received_cmd = node_ws.receive_json()
+    async def close(self, **_kwargs):
+        self.closed = True
 
-            assert node_received_cmd["type"] == "MITIGATION_COMMAND"
-            assert node_received_cmd["command_id"] == "cmd-xyz"
 
-            node_ws.send_json({
-                "version": PROTOCOL_VERSION,
-                "type": "COMMAND_ACK",
-                "room_id": room_id,
-                "command_id": "cmd-xyz",
-                "applied": True,
-                "state_after": "MITIGATING",
-                "latency_ms": 8.4,
-                "timestamp": time.time(),
-            })
+def test_room_pairing_command_routing_and_ack():
+    async def scenario():
+        manager = RoomManager()
+        room_id = "HUSH-TEST-PAIR"
+        operator = FakeWebSocket()
+        node = FakeWebSocket()
 
-            op_received_ack = op_ws.receive_json()
-            while op_received_ack.get("type") == "HEARTBEAT":
-                op_received_ack = op_ws.receive_json()
+        room = await manager.register_connection(room_id, Role.OPERATOR, operator)
+        assert operator.messages[-1]["type"] == "PAIR"
+        assert operator.messages[-1]["paired"] is False
 
-            assert op_received_ack["type"] == "COMMAND_ACK"
-            assert op_received_ack["command_id"] == "cmd-xyz"
-            assert op_received_ack["applied"] is True
+        await manager.register_connection(room_id, Role.NODE, node)
+        assert room.is_paired
+        assert operator.messages[-1]["paired"] is True
+        assert node.messages[-1]["paired"] is True
+
+        command = MitigationCommandMessage(
+            room_id=room_id,
+            command_id="cmd-xyz",
+            reduction_ratio=0.6,
+            ramp_ms=200,
+            dither_hz=50,
+            reason="AUTO_PERSISTENCE_4_OF_6",
+            timestamp=time.time(),
+        ).model_dump(mode="json")
+        await room.send_to_node(command)
+        assert node.messages[-1]["type"] == "MITIGATION_COMMAND"
+        assert node.messages[-1]["command_id"] == "cmd-xyz"
+
+        ack = CommandAckMessage(
+            room_id=room_id,
+            command_id="cmd-xyz",
+            applied=True,
+            state_after="MITIGATED",
+            latency_ms=8.4,
+            timestamp=time.time(),
+        ).model_dump(mode="json")
+        await room.send_to_operator(ack)
+        assert operator.messages[-1]["type"] == "COMMAND_ACK"
+        assert operator.messages[-1]["applied"] is True
+
+        await manager.remove_connection(room_id, node)
+        await manager.remove_connection(room_id, operator)
+
+    asyncio.run(scenario())
+
+
+def test_operator_liveness_heartbeat_lifecycle():
+    async def scenario():
+        manager = RoomManager()
+        room_id = "HUSH-TEST-LIVENESS"
+        operator = FakeWebSocket()
+        node = FakeWebSocket()
+
+        room = await manager.register_connection(room_id, Role.NODE, node)
+        assert not room.is_paired
+        assert room.heartbeat_task is None
+
+        await manager.register_connection(room_id, Role.OPERATOR, operator)
+        assert room.is_paired
+        assert room.heartbeat_task is not None
+
+        await asyncio.sleep(0.55)
+        assert any(message["type"] == "HEARTBEAT" for message in node.messages)
+        assert any(message["type"] == "HEARTBEAT" for message in operator.messages)
+
+        await manager.remove_connection(room_id, operator)
+        assert not room.is_paired
+        assert room.heartbeat_task is None
+        assert node.messages[-1]["type"] == "PAIR"
+        assert node.messages[-1]["paired"] is False
+
+        await manager.remove_connection(room_id, node)
+        assert manager.get_room(room_id) is None
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_role_replaces_and_closes_stale_socket():
+    async def scenario():
+        manager = RoomManager()
+        first = FakeWebSocket()
+        replacement = FakeWebSocket()
+        await manager.register_connection("HUSH-REPLACE", Role.OPERATOR, first)
+        room = await manager.register_connection("HUSH-REPLACE", Role.OPERATOR, replacement)
+        assert first.closed is True
+        assert room.operator_ws is replacement
+        await manager.remove_connection("HUSH-REPLACE", replacement)
+
+    asyncio.run(scenario())
+
+
+def test_commands_are_fresh_and_idempotent():
+    manager = RoomManager()
+    room = manager.get_or_create_room("HUSH-IDEMPOTENT")
+    assert room.accept_command("cmd-1", time.time()) == (True, "")
+    assert room.accept_command("cmd-1", time.time()) == (False, "DUPLICATE_COMMAND")
+    assert room.accept_command("cmd-old", time.time() - 10) == (False, "STALE_COMMAND")

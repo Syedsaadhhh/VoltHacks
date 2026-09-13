@@ -1,23 +1,19 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -e
 
-echo "=================================================="
-echo "  CutHush - Two-Device Physical Loop Dev Runner   "
-echo "=================================================="
+echo "CutHush - browser hardware-in-the-loop test cell"
+LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [ -n "$LAN_IP" ]; then
+  echo "Phone pairing origin: http://${LAN_IP}:5173"
+else
+  echo "Phone pairing origin: enter this laptop's LAN IPv4 address in the app"
+fi
 
-# Trap exit to kill background jobs
 trap 'kill $(jobs -p) 2>/dev/null' EXIT
-
-# Start Backend
-echo "[1/2] Starting CutHush FastAPI Backend on http://localhost:8000..."
 (
-    cd "$(dirname "$0")/.."
-    python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+  cd "$(dirname "$0")/.."
+  python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
 ) &
-
 sleep 2
-
-# Start Frontend
-echo "[2/2] Starting CutHush Vite Frontend on http://localhost:5173..."
 cd "$(dirname "$0")/../frontend"
 npm run dev

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import secrets
 import time
 from typing import Dict, Optional, List
@@ -18,6 +18,8 @@ class Room:
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.heartbeat_seq = 0
         self.node_armed = False
+        self.seen_command_ids: set[str] = set()
+        self.command_order: list[str] = []
 
     @property
     def is_paired(self) -> bool:
@@ -31,6 +33,18 @@ class Room:
             peers.append("node")
         return peers
 
+    def accept_command(self, command_id: str, timestamp: float) -> tuple[bool, str]:
+        if time.time() - timestamp > 5:
+            return False, "STALE_COMMAND"
+        if command_id in self.seen_command_ids:
+            return False, "DUPLICATE_COMMAND"
+        self.seen_command_ids.add(command_id)
+        self.command_order.append(command_id)
+        if len(self.command_order) > 256:
+            expired = self.command_order.pop(0)
+            self.seen_command_ids.discard(expired)
+        return True, ""
+
     async def broadcast(self, message_dict: dict, exclude: Optional[WebSocket] = None):
         recipients = []
         if self.operator_ws and self.operator_ws != exclude:
@@ -39,43 +53,49 @@ class Room:
             recipients.append(self.node_ws)
         for ws in recipients:
             try:
-                await ws.send_json(message_dict)
+                await asyncio.wait_for(ws.send_json(message_dict), timeout=0.2)
             except Exception:
                 pass
 
     async def send_to_operator(self, message_dict: dict):
         if self.operator_ws:
             try:
-                await self.operator_ws.send_json(message_dict)
+                await asyncio.wait_for(self.operator_ws.send_json(message_dict), timeout=0.2)
             except Exception:
                 pass
 
     async def send_to_node(self, message_dict: dict):
         if self.node_ws:
             try:
-                await self.node_ws.send_json(message_dict)
+                await asyncio.wait_for(self.node_ws.send_json(message_dict), timeout=0.2)
             except Exception:
                 pass
 
-    def start_heartbeat(self):
-        if self.heartbeat_task is None or self.heartbeat_task.done():
-            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+    def sync_heartbeat(self):
+        """Heartbeats indicate operator-liveness: run only while both operator and node are connected."""
+        if self.is_paired:
+            if self.heartbeat_task is None or self.heartbeat_task.done():
+                self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        else:
+            self.stop_heartbeat()
 
     def stop_heartbeat(self):
         if self.heartbeat_task and not self.heartbeat_task.done():
             self.heartbeat_task.cancel()
-            self.heartbeat_task = None
+        self.heartbeat_task = None
 
     async def _heartbeat_loop(self):
         try:
             while True:
                 await asyncio.sleep(0.5)
+                if not self.is_paired:
+                    break
                 self.heartbeat_seq += 1
                 hb = HeartbeatMessage(
                     room_id=self.room_id,
                     timestamp=time.time(),
                     seq=self.heartbeat_seq,
-                    interval_ms=500
+                    interval_ms=500,
                 ).model_dump(mode="json")
                 if self.node_ws:
                     await self.send_to_node(hb)
@@ -106,17 +126,30 @@ class RoomManager:
     async def register_connection(self, room_id: str, role: Role, ws: WebSocket) -> Room:
         room = self.get_or_create_room(room_id)
         if role == Role.OPERATOR:
+            previous = room.operator_ws
             room.operator_ws = ws
+            if previous and previous is not ws:
+                try:
+                    await previous.close(code=1000, reason="operator replaced")
+                except Exception:
+                    pass
         elif role == Role.NODE:
+            previous = room.node_ws
             room.node_ws = ws
-            room.start_heartbeat()
+            if previous and previous is not ws:
+                try:
+                    await previous.close(code=1000, reason="node replaced")
+                except Exception:
+                    pass
+
+        room.sync_heartbeat()
 
         pair_msg = PairMessage(
             room_id=room_id,
             role=role,
             paired=room.is_paired,
             peers=room.get_peers(),
-            timestamp=time.time()
+            timestamp=time.time(),
         ).model_dump(mode="json")
         await room.broadcast(pair_msg)
         return room
@@ -133,19 +166,20 @@ class RoomManager:
         if room.node_ws == ws:
             room.node_ws = None
             was_node = True
-            room.stop_heartbeat()
+
+        room.sync_heartbeat()
 
         if room.operator_ws is None and room.node_ws is None:
             room.stop_heartbeat()
             self.rooms.pop(room_id, None)
-        else:
+        elif was_node or was_operator:
             role = Role.OPERATOR if was_operator else Role.NODE
             pair_msg = PairMessage(
                 room_id=room_id,
                 role=role,
                 paired=room.is_paired,
                 peers=room.get_peers(),
-                timestamp=time.time()
+                timestamp=time.time(),
             ).model_dump(mode="json")
             await room.broadcast(pair_msg)
 

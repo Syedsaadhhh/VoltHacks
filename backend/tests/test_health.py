@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 from fastapi.testclient import TestClient
 from backend.app.main import app
 
@@ -9,7 +9,7 @@ def test_health_check():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ok"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "0.3.0"
     assert data["protocol_version"] == "1.0.0"
     assert "active_rooms" in data
     assert "timestamp" in data
