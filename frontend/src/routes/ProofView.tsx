@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, FileWarning, Link2 } from "lucide-react";
 import { sha256Hex } from "../proof/integrity";
+import { apiUrl } from "../backend";
 
 interface Props { runId: string; }
 interface ProofArtifact {
@@ -29,7 +30,7 @@ export const ProofView: React.FC<Props> = ({ runId }) => {
           return;
         }
         if (runId !== "latest") {
-          const response = await fetch(`/api/proofs/${encodeURIComponent(runId)}`);
+          const response = await fetch(apiUrl(`/api/proofs/${encodeURIComponent(runId)}`));
           if (response.ok && !cancelled) {
             const artifact = await response.json() as ProofArtifact;
             const { digest, ...unsigned } = artifact;
@@ -56,6 +57,6 @@ export const ProofView: React.FC<Props> = ({ runId }) => {
       <section className="proof-verdict"><CheckCircle2 className={proof.outcome === "RECOVERED" ? "text-green" : "text-amber"} /><div><span>INCIDENT IDENTITY</span><strong>SEED #{proof.seed} / {proof.source}</strong><small>{new Date(proof.created_at).toLocaleString()} · room {proof.room_id}</small></div></section>
       <section className={`integrity-strip ${integrityValid ? "is-valid" : "is-invalid"}`}><Link2 size={15} /><div><span>SHA-256 EVIDENCE HEAD · {integrityValid ? "VERIFIED" : "MISMATCH"}</span><code>{proof.digest}</code><small>{proof.previous_digest ? `chains to ${proof.previous_digest.slice(0, 16)}…` : "first proof in this device chain"}</small></div></section>
     </>}
-    <a href="/methodology" className="btn btn-secondary btn-md">Read methodology</a>
+    <a href="/?page=methodology" className="btn btn-secondary btn-md">Read methodology</a>
   </main>;
 };
