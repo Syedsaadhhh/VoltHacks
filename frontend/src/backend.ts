@@ -1,4 +1,4 @@
-const configuredOrigin = (import.meta.env.VITE_BACKEND_ORIGIN as string | undefined)
+const configuredOrigin = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env?.VITE_BACKEND_ORIGIN
   ?.trim()
   .replace(/\/+$/, "");
 
