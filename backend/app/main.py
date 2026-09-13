@@ -1,4 +1,4 @@
-﻿import time
+import time
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +8,9 @@ from .protocol import (
     ErrorMessage,
     MessageType,
     Role,
+    ProtocolFatalError,
+    ProtocolCommandError,
+    validate_inbound_message,
 )
 from .rooms import room_manager
 
@@ -67,69 +70,71 @@ async def get_room(room_id: str):
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
     await websocket.accept()
     current_role: Optional[Role] = None
+    registered = False
     try:
+        # First message must be HELLO
         hello_data = await websocket.receive_json()
-        version = hello_data.get("version")
-        if version != PROTOCOL_VERSION:
+        try:
+            validated_hello = validate_inbound_message(hello_data, room_id, current_role=None)
+        except ProtocolFatalError as pfe:
             err = ErrorMessage(
                 room_id=room_id,
-                code="VERSION_MISMATCH",
-                message=f"Expected protocol {PROTOCOL_VERSION}, got {version}",
+                code=pfe.code,
+                message=pfe.message,
                 timestamp=time.time(),
             ).model_dump(mode="json")
             await websocket.send_json(err)
-            await websocket.close(code=1002)
+            await websocket.close(code=pfe.ws_close_code)
             return
 
-        msg_type = hello_data.get("type")
-        if msg_type != MessageType.HELLO.value:
-            err = ErrorMessage(
-                room_id=room_id,
-                code="UNEXPECTED_MESSAGE",
-                message="First message must be HELLO",
-                timestamp=time.time(),
-            ).model_dump(mode="json")
-            await websocket.send_json(err)
-            await websocket.close(code=1002)
-            return
-
-        role_str = hello_data.get("role")
-        if role_str == "operator":
-            current_role = Role.OPERATOR
-        elif role_str == "node":
-            current_role = Role.NODE
-        else:
-            err = ErrorMessage(
-                room_id=room_id,
-                code="INVALID_ROLE",
-                message="Role must be operator or node",
-                timestamp=time.time(),
-            ).model_dump(mode="json")
-            await websocket.send_json(err)
-            await websocket.close(code=1003)
-            return
-
+        current_role = validated_hello.role
         room = await room_manager.register_connection(room_id, current_role, websocket)
+        registered = True
 
         while True:
             data = await websocket.receive_json()
-            m_type = data.get("type")
+            try:
+                msg = validate_inbound_message(data, room_id, current_role=current_role)
+            except ProtocolFatalError as pfe:
+                err = ErrorMessage(
+                    room_id=room_id,
+                    code=pfe.code,
+                    message=pfe.message,
+                    timestamp=time.time(),
+                ).model_dump(mode="json")
+                await websocket.send_json(err)
+                await websocket.close(code=pfe.ws_close_code)
+                break
+            except ProtocolCommandError as pce:
+                err = ErrorMessage(
+                    room_id=room_id,
+                    code=pce.code,
+                    message=pce.message,
+                    timestamp=time.time(),
+                ).model_dump(mode="json")
+                await websocket.send_json(err)
+                # Non-fatal command error: leave connection open and do not forward
+                continue
 
-            if m_type == MessageType.MITIGATION_COMMAND.value:
-                await room.send_to_node(data)
-            elif m_type == MessageType.COMMAND_ACK.value:
-                await room.send_to_operator(data)
-            elif m_type in (
-                MessageType.NODE_READY.value,
-                MessageType.START_PROFILE.value,
-                MessageType.INJECT_INSTABILITY.value,
-                MessageType.SAFE_HOLD.value,
+            payload = msg.model_dump(mode="json")
+            if msg.type == MessageType.MITIGATION_COMMAND:
+                await room.send_to_node(payload)
+            elif msg.type == MessageType.COMMAND_ACK:
+                await room.send_to_operator(payload)
+            elif msg.type in (
+                MessageType.NODE_READY,
+                MessageType.START_PROFILE,
+                MessageType.INJECT_INSTABILITY,
+                MessageType.SAFE_HOLD,
             ):
-                await room.send_to_operator(data)
+                await room.send_to_operator(payload)
             else:
-                await room.broadcast(data, exclude=websocket)
+                await room.broadcast(payload, exclude=websocket)
 
     except WebSocketDisconnect:
-        await room_manager.remove_connection(room_id, websocket)
+        pass
     except Exception:
-        await room_manager.remove_connection(room_id, websocket)
+        pass
+    finally:
+        if registered:
+            await room_manager.remove_connection(room_id, websocket)

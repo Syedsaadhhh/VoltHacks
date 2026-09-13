@@ -6,6 +6,7 @@ import {
   AlertOctagon,
   ShieldCheck,
   Clock,
+  Binary,
 } from "lucide-react";
 import { BenchNodeAudioEngine } from "../audio/bench_node_synth";
 import { PROTOCOL_VERSION, WebSocketMessage } from "../protocol/types";
@@ -21,12 +22,21 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
   const [heartbeatAge, setHeartbeatAge] = useState(0);
   const [watchdogRemaining, setWatchdogRemaining] = useState(1200);
   const [lastCommandTime, setLastCommandTime] = useState<string | null>(null);
+  const [activeSeed] = useState(2026);
 
   const engineRef = useRef<BenchNodeAudioEngine | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const profileRef = useRef<"IDLE" | "NOMINAL" | "INSTABILITY" | "MITIGATED" | "SAFE_HOLD">("IDLE");
 
+  // Keep profileRef synchronized with profile state to eliminate stale closures
   useEffect(() => {
-    engineRef.current = new BenchNodeAudioEngine((reason) => {
+    profileRef.current = profile;
+  }, [profile]);
+
+  // Audio Engine Lifecycle: exactly one instance per mounted node / roomCode.
+  // CRITICAL: profile MUST NOT be in the dependency array!
+  useEffect(() => {
+    const engine = new BenchNodeAudioEngine((reason) => {
       setProfile("SAFE_HOLD");
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -41,13 +51,14 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
         );
       }
     });
+    engineRef.current = engine;
 
     const telemetryInterval = setInterval(() => {
       if (engineRef.current) {
         const tel = engineRef.current.getWatchdogTelemetry();
         setHeartbeatAge(tel.lastHeartbeatAgeMs);
         setWatchdogRemaining(tel.watchdogRemainingMs);
-        if (tel.safeHoldTriggered && profile !== "SAFE_HOLD") {
+        if (tel.safeHoldTriggered && profileRef.current !== "SAFE_HOLD") {
           setProfile("SAFE_HOLD");
         }
       }
@@ -55,10 +66,12 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
 
     return () => {
       clearInterval(telemetryInterval);
-      engineRef.current?.dispose();
+      engine.dispose();
+      engineRef.current = null;
     };
-  }, [roomCode, profile]);
+  }, [roomCode]);
 
+  // WebSocket Lifecycle: depends only on roomCode
   useEffect(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/${roomCode}`;
@@ -72,7 +85,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
           version: PROTOCOL_VERSION,
           type: "HELLO",
           room_id: roomCode,
-          client_id: `node-${Math.random().toString(36).substring(2, 7)}`,
+          client_id: `node-${Date.now().toString(36)}`,
           role: "node",
           timestamp: Date.now() / 1000,
         })
@@ -143,13 +156,41 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
   };
 
   const handleStartNominal = () => {
-    engineRef.current?.startNominal();
+    engineRef.current?.startNominal(activeSeed);
     setProfile("NOMINAL");
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          version: PROTOCOL_VERSION,
+          type: "START_PROFILE",
+          room_id: roomCode,
+          profile_type: "NOMINAL",
+          parameters: { seed: activeSeed },
+          timestamp: Date.now() / 1000,
+        })
+      );
+    }
   };
 
   const handleInjectInstability = () => {
-    engineRef.current?.injectInstability("INC-BENCH-001", 2400);
+    engineRef.current?.injectInstability("INC-BENCH-001", 2400, activeSeed);
     setProfile("INSTABILITY");
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          version: PROTOCOL_VERSION,
+          type: "INJECT_INSTABILITY",
+          room_id: roomCode,
+          active: true,
+          incident_id: "INC-BENCH-001",
+          target_freq_hz: 2400.0,
+          seed: activeSeed,
+          timestamp: Date.now() / 1000,
+        })
+      );
+    }
   };
 
   const handleStop = () => {
@@ -162,18 +203,19 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
       <header className="node-header">
         <div className="flex-col">
           <span className="badge badge-amber text-xs font-bold">BENCH MACHINE NODE</span>
-          <span className="text-secondary text-xs mt-1">Room: {roomCode}</span>
+          <span className="text-secondary text-xs mt-1 text-mono">Room: {roomCode}</span>
         </div>
         <div className="flex-center gap-2">
-          <span className={`status-dot ${wsConnected ? "dot-green" : "dot-red"}`} />
+          {/* Signal cyan for paired/linked state; red for offline */}
+          <span className={`status-dot ${wsConnected ? "dot-cyan" : "dot-red"}`} />
           <span className="text-mono text-xs">{wsConnected ? "LINKED" : "OFFLINE"}</span>
         </div>
       </header>
 
       <div className="truth-card-sm">
-        <ShieldCheck size={14} className="text-amber" />
+        <ShieldCheck size={14} className="text-amber shrink-0" />
         <span className="text-xs text-secondary">
-          Bench simulation proxy. Not a real CNC machine. Emits calibrated audio into room.
+          Bench audio proxy, not a real CNC machine. Emits calibrated audio into room.
         </span>
       </div>
 
@@ -191,7 +233,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
       ) : (
         <div className="armed-controls">
           <div className="node-status-card">
-            <span className="text-xs text-secondary font-semibold">ACTUATOR STATUS</span>
+            <span className="text-xs text-secondary font-semibold tracking-wider">ACTUATOR STATUS</span>
             <div className="status-word-container">
               <span
                 className={`status-word ${
@@ -207,6 +249,10 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
                 {profile}
               </span>
             </div>
+            <div className="flex-center gap-2 text-mono text-xs text-secondary mt-1">
+              <Binary size={12} className="text-secondary" />
+              <span>Seed: #{activeSeed} (Mulberry32 PRNG)</span>
+            </div>
             {lastCommandTime && (
               <span className="text-mono text-xs text-secondary mt-1">
                 Last Mitigation: {lastCommandTime}
@@ -220,7 +266,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
               className={`btn btn-profile ${profile === "NOMINAL" ? "btn-profile-active" : ""}`}
             >
               <Volume2 size={20} />
-              <span>Nominal Machine (400 Hz)</span>
+              <span>Nominal Machine (400 Hz Proxy)</span>
             </button>
 
             <button
@@ -228,7 +274,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
               className={`btn btn-profile btn-danger ${profile === "INSTABILITY" ? "btn-danger-active" : ""}`}
             >
               <AlertOctagon size={20} />
-              <span>Inject Instability (2.4 kHz)</span>
+              <span>Inject Instability (2.4 kHz Chatter)</span>
             </button>
 
             <button onClick={handleStop} className="btn btn-secondary w-full">
@@ -261,7 +307,7 @@ export const NodeView: React.FC<Props> = ({ roomCode }) => {
             {profile === "SAFE_HOLD" && (
               <div className="safe-hold-alert mt-2">
                 <AlertOctagon size={16} />
-                <span>SAFE HOLD ACTIVE: Heartbeats expired. Audio ramped to 0.</span>
+                <span>SAFE HOLD ACTIVE: Heartbeats expired (&gt;1200ms). Audio ramped to 0. Touch action required to resume.</span>
               </div>
             )}
           </div>

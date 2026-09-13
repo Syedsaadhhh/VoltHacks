@@ -1,10 +1,50 @@
+/**
+ * Bench Node Audio Engine
+ *
+ * Simulates machine cutting proxy audio (nominal spindle/tooth-pass proxy + friction noise,
+ * and seeded narrowband chatter instability with 15 Hz AM flutter).
+ *
+ * TRUTH BOUNDARY: This is a bench audio proxy, NOT a real CNC machine.
+ */
+
 export interface SynthTelemetry {
   armed: boolean;
   activeProfile: "IDLE" | "NOMINAL" | "INSTABILITY" | "MITIGATED" | "SAFE_HOLD";
   incidentId: string | null;
+  seed: number;
   lastHeartbeatAgeMs: number;
   watchdogRemainingMs: number;
   safeHoldTriggered: boolean;
+}
+
+/**
+ * Mulberry32 deterministic 32-bit PRNG.
+ * Produces float in [0, 1) with uniform distribution for a given seed.
+ */
+export function mulberry32(seed: number): () => number {
+  let s = Math.floor(seed) >>> 0;
+  return function () {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Generates deterministic noise samples for friction texture buffer.
+ */
+export function generateDeterministicNoiseSamples(
+  length: number,
+  seed: number,
+  amplitude: number = 0.05
+): Float32Array {
+  const data = new Float32Array(length);
+  const rng = mulberry32(seed);
+  for (let i = 0; i < length; i++) {
+    data[i] = (rng() * 2 - 1) * amplitude;
+  }
+  return data;
 }
 
 export class BenchNodeAudioEngine {
@@ -27,6 +67,7 @@ export class BenchNodeAudioEngine {
   public armed = false;
   public activeProfile: "IDLE" | "NOMINAL" | "INSTABILITY" | "MITIGATED" | "SAFE_HOLD" = "IDLE";
   public incidentId: string | null = null;
+  public activeSeed: number = 2026;
   private lastHeartbeatTime: number = 0;
   private watchdogInterval: number | null = null;
   private readonly WATCHDOG_TIMEOUT_MS = 1200;
@@ -41,7 +82,9 @@ export class BenchNodeAudioEngine {
       return;
     }
 
-    const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     this.ctx = new AudioContextClass();
     if (this.ctx.state === "suspended") {
       await this.ctx.resume();
@@ -60,12 +103,15 @@ export class BenchNodeAudioEngine {
 
   public feedHeartbeat(): void {
     this.lastHeartbeatTime = performance.now();
-    if (this.activeProfile === "SAFE_HOLD") {
-      // Remain in safe hold until explicitly re-started or reset
-    }
+    // In SAFE_HOLD: watchdog timer is refreshed so it won't immediately re-trip upon user action,
+    // but audio remains silenced and activeProfile stays SAFE_HOLD until explicit user action!
   }
 
-  public getWatchdogTelemetry(): { lastHeartbeatAgeMs: number; watchdogRemainingMs: number; safeHoldTriggered: boolean } {
+  public getWatchdogTelemetry(): {
+    lastHeartbeatAgeMs: number;
+    watchdogRemainingMs: number;
+    safeHoldTriggered: boolean;
+  } {
     const now = performance.now();
     const age = this.lastHeartbeatTime > 0 ? Math.max(0, now - this.lastHeartbeatTime) : 0;
     const remaining = Math.max(0, this.WATCHDOG_TIMEOUT_MS - age);
@@ -86,16 +132,21 @@ export class BenchNodeAudioEngine {
       const age = now - this.lastHeartbeatTime;
 
       // If no heartbeat for > 1200ms while running audio, trigger node-local safe hold
-      if (age > this.WATCHDOG_TIMEOUT_MS && this.activeProfile !== "SAFE_HOLD" && this.activeProfile !== "IDLE") {
+      if (
+        age > this.WATCHDOG_TIMEOUT_MS &&
+        this.activeProfile !== "SAFE_HOLD" &&
+        this.activeProfile !== "IDLE"
+      ) {
         this.triggerSafeHold("HEARTBEAT_TIMEOUT_EXCEEDED_1200MS");
       }
     }, 100);
   }
 
-  public startNominal(): void {
+  public startNominal(seed: number = 2026): void {
     if (!this.ctx || !this.masterGain || !this.armed) return;
 
     this.stopAllVoices();
+    this.activeSeed = seed;
     const now = this.ctx.currentTime;
 
     // 1. Fundamental rotational proxy (200 Hz)
@@ -118,13 +169,13 @@ export class BenchNodeAudioEngine {
     toothGain.connect(this.masterGain);
     this.toothPassOsc.start(now);
 
-    // 3. Broadband cutting friction texture (filtered white noise)
+    // 3. Broadband cutting friction texture (deterministic filtered PRNG noise)
     const bufferSize = this.ctx.sampleRate * 2;
     const noiseBuffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = (Math.random() * 2 - 1) * 0.05;
-    }
+    const channelData = noiseBuffer.getChannelData(0);
+    const noiseSamples = generateDeterministicNoiseSamples(bufferSize, seed, 0.05);
+    channelData.set(noiseSamples);
+
     this.noiseSource = this.ctx.createBufferSource();
     this.noiseSource.buffer = noiseBuffer;
     this.noiseSource.loop = true;
@@ -151,24 +202,34 @@ export class BenchNodeAudioEngine {
     this.incidentId = null;
   }
 
-  public injectInstability(incidentId: string = "INC-BENCH-001", targetFreqHz: number = 2400): void {
+  public injectInstability(
+    incidentId: string = "INC-BENCH-001",
+    targetFreqHz: number = 2400,
+    seed: number = 2026
+  ): void {
     if (!this.ctx || !this.masterGain || !this.armed) return;
     if (this.activeProfile === "IDLE") {
-      this.startNominal();
+      this.startNominal(seed);
     }
+    this.incidentId = incidentId;
+    this.activeSeed = seed;
     const now = this.ctx.currentTime;
 
-    // Stop prior chatter if running
+    // Stop prior chatter voices if active
     if (this.chatterOsc) {
-      try { this.chatterOsc.stop(); } catch {}
+      try {
+        this.chatterOsc.stop();
+      } catch {}
       this.chatterOsc.disconnect();
     }
     if (this.lfoOsc) {
-      try { this.lfoOsc.stop(); } catch {}
+      try {
+        this.lfoOsc.stop();
+      } catch {}
       this.lfoOsc.disconnect();
     }
 
-    // Narrowband chatter tone (2400 Hz)
+    // Narrowband chatter tone (target frequency, default 2400 Hz)
     this.chatterOsc = this.ctx.createOscillator();
     this.chatterOsc.type = "sawtooth";
     this.chatterOsc.frequency.setValueAtTime(targetFreqHz, now);
@@ -200,10 +261,13 @@ export class BenchNodeAudioEngine {
     this.chatterGain.gain.linearRampToValueAtTime(0.4, now + 0.2);
 
     this.activeProfile = "INSTABILITY";
-    this.incidentId = incidentId;
   }
 
-  public applyMitigation(reductionRatio: number = 0.5, rampMs: number = 250, ditherHz: number = 40): { applied: boolean; latencyMs: number } {
+  public applyMitigation(
+    reductionRatio: number = 0.5,
+    rampMs: number = 250,
+    ditherHz: number = 40
+  ): { applied: boolean; latencyMs: number } {
     const startTime = performance.now();
     if (!this.ctx || !this.masterGain || !this.armed) {
       return { applied: false, latencyMs: 0 };
@@ -258,11 +322,21 @@ export class BenchNodeAudioEngine {
     this.masterGain.gain.linearRampToValueAtTime(0.0, now + 0.05);
 
     setTimeout(() => {
-      try { this.fundamentalOsc?.stop(); } catch {}
-      try { this.toothPassOsc?.stop(); } catch {}
-      try { this.noiseSource?.stop(); } catch {}
-      try { this.chatterOsc?.stop(); } catch {}
-      try { this.lfoOsc?.stop(); } catch {}
+      try {
+        this.fundamentalOsc?.stop();
+      } catch {}
+      try {
+        this.toothPassOsc?.stop();
+      } catch {}
+      try {
+        this.noiseSource?.stop();
+      } catch {}
+      try {
+        this.chatterOsc?.stop();
+      } catch {}
+      try {
+        this.lfoOsc?.stop();
+      } catch {}
 
       this.fundamentalOsc = null;
       this.toothPassOsc = null;
