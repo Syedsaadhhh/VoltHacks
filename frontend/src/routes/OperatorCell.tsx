@@ -8,6 +8,7 @@ import { PhonePairing } from "../components/PhonePairing";
 import { SpectrumCanvas } from "../components/SpectrumCanvas";
 import { CommandAckMessage, PROTOCOL_VERSION, SystemState, WebSocketMessage } from "../protocol/types";
 import { sha256Hex } from "../proof/integrity";
+import { apiUrl, websocketUrl } from "../backend";
 
 interface Props { roomCode: string; initialReplay?: boolean; }
 interface EventItem { at: string; message: string; tone: "info" | "success" | "danger"; }
@@ -84,13 +85,12 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
   }, []);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     let disposed = false;
     let attempt = 0;
     let reconnectTimer: number | undefined;
     const connect = () => {
       if (disposed) return;
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws/${roomCode}`);
+      const ws = new WebSocket(websocketUrl(`/ws/${roomCode}`));
       wsRef.current = ws;
       ws.onopen = () => {
         attempt = 0;
@@ -154,9 +154,9 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
       setCapsule(artifact);
       window.localStorage.setItem("cuthush-latest-proof", JSON.stringify(artifact));
       window.localStorage.setItem("cuthush-proof-head", digest);
-      window.history.replaceState({}, "", `/cell/${encodeURIComponent(roomCode)}?source=${sourceRef.current}`);
+      window.history.replaceState({}, "", `/?room=${encodeURIComponent(roomCode)}&source=${sourceRef.current}`);
       try {
-        const response = await fetch("/api/proofs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(artifact) });
+        const response = await fetch(apiUrl("/api/proofs"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(artifact) });
         addEvent(response.ok ? `Proof persisted · ${digest.slice(0, 10)}…` : "Proof saved locally; server persistence unavailable", response.ok ? "success" : "danger");
       } catch { addEvent("Proof saved locally; server persistence unavailable", "danger"); }
     };
@@ -316,8 +316,8 @@ export const OperatorCell: React.FC<Props> = ({ roomCode, initialReplay = false 
       {micError && <div className="error-alert"><AlertTriangle size={15} />{micError}</div>}
       <SpectrumCanvas getFrequencyData={getFrequencyData} sampleRate={source === "live" ? micSettings.sampleRate : 48000} isReplay={source === "replay"} />
       <div className="metric-band"><div><span>DOMINANT</span><strong>{metrics.dominantHz} Hz</strong></div><div><span>BASELINE Δ</span><strong>{metrics.baselineDeltaDb.toFixed(1)} dB</strong></div><div><span>PROMINENCE</span><strong>{metrics.prominenceDb.toFixed(1)} dB</strong></div><div><span>PERSISTENCE</span><strong>{persistenceLabel}</strong></div><div><span>INSTABILITY</span><strong>{metrics.instabilityScore.toFixed(0)}/100</strong></div><div><span>RECOVERY</span><strong>{reductionDb === null ? "—" : `${reductionDb.toFixed(1)} dB`}</strong></div></div>
-      <div className="proof-surface"><div className="proof-heading"><div><p className="eyebrow">JUDGE MODE / COUNTERFACTUAL PROOF</p><h2>Same incident. Different outcome.</h2></div><div className="proof-actions"><button onClick={exportCapsule} disabled={!capsule} className="btn btn-ghost btn-sm"><Download size={14} /> Export Run Capsule</button>{capsule && <a href={`/proof/${capsule.run_id}`} className="btn btn-secondary btn-sm">Open proof</a>}</div></div><div className="proof-columns"><div className="proof-column"><span>GOVERNOR OFF</span><strong>{proof.offExposureMs ? `${proof.offExposureMs} ms` : "WAITING"}</strong><small>instability exposure · seed #{proof.seed}</small></div><div className={`proof-column proof-outcome ${proof.outcome === "RECOVERED" ? "is-recovered" : ""}`}><span>GOVERNOR ON</span><strong>{proof.outcome}</strong><small>{proof.reductionDb === null ? "measurement pending" : `${proof.reductionDb.toFixed(1)} dB measured reduction · ${proof.onExposureMs} ms exposure`}</small></div></div>{capsule && <p className="proof-hash">SHA-256 {capsule.digest}</p>}</div>
+      <div className="proof-surface"><div className="proof-heading"><div><p className="eyebrow">JUDGE MODE / COUNTERFACTUAL PROOF</p><h2>Same incident. Different outcome.</h2></div><div className="proof-actions"><button onClick={exportCapsule} disabled={!capsule} className="btn btn-ghost btn-sm"><Download size={14} /> Export Run Capsule</button>{capsule && <a href={`/?proof=${encodeURIComponent(capsule.run_id)}`} className="btn btn-secondary btn-sm">Open proof</a>}</div></div><div className="proof-columns"><div className="proof-column"><span>GOVERNOR OFF</span><strong>{proof.offExposureMs ? `${proof.offExposureMs} ms` : "WAITING"}</strong><small>instability exposure · seed #{proof.seed}</small></div><div className={`proof-column proof-outcome ${proof.outcome === "RECOVERED" ? "is-recovered" : ""}`}><span>GOVERNOR ON</span><strong>{proof.outcome}</strong><small>{proof.reductionDb === null ? "measurement pending" : `${proof.reductionDb.toFixed(1)} dB measured reduction · ${proof.onExposureMs} ms exposure`}</small></div></div>{capsule && <p className="proof-hash">SHA-256 {capsule.digest}</p>}</div>
     </div><aside className="instrument-side"><PhonePairing roomCode={roomCode} /><section className="card source-card"><div className="card-header"><span className="card-title">SIGNAL SOURCE</span><ShieldCheck size={15} className="text-amber" /></div><LivenessMeter level={liveness} sourceLabel={source === "replay" ? "REPLAY_FIXTURE" : micActive ? "LIVE_MIC" : "DISCONNECTED"} isLive={source === "replay" || micActive} /><div className="source-facts"><span>Sample rate <b>{source === "replay" ? 48000 : micSettings.sampleRate} Hz</b></span><span>Echo cancel <b>{micSettings.echoCancellation === undefined ? "reported on grant" : micSettings.echoCancellation ? "browser forced" : "requested off"}</b></span><span>Seed <b>#{SEED}</b></span></div></section><section className="card event-card"><div className="card-header"><div className="flex-center gap-2"><Terminal size={14} className="text-cyan" /><span className="card-title">EVIDENCE TIMELINE</span></div>{lastAck && <CheckCircle2 size={15} className="text-green" />}</div><div className="event-list">{events.length === 0 && <p className="empty-state">Awaiting a measured event.</p>}{events.map((item, index) => <div className={`event-row event-${item.tone}`} key={`${item.at}-${index}`}><span className="event-time">{item.at}</span><span>{item.message}</span></div>)}</div></section></aside></section>
-    <footer className="truth-footer"><Activity size={14} /><span>Bench audio proxy—not field validation on a CNC machine. Green appears only after measured recovery.</span><a href="/methodology" className="btn btn-ghost btn-xs">Method</a><button onClick={() => { replayRef.current.reset(SEED); setReductionDb(null); savedRunRef.current = null; setCapsule(null); setProof({ runId: null, seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" }); transition(nodePaired ? "READY" : "UNPAIRED", "test cell reset"); }} className="btn btn-ghost btn-xs"><RotateCcw size={12} /> Reset</button></footer>
+    <footer className="truth-footer"><Activity size={14} /><span>Bench audio proxy—not field validation on a CNC machine. Green appears only after measured recovery.</span><a href="/?page=methodology" className="btn btn-ghost btn-xs">Method</a><button onClick={() => { replayRef.current.reset(SEED); setReductionDb(null); savedRunRef.current = null; setCapsule(null); setProof({ runId: null, seed: SEED, offExposureMs: 0, onExposureMs: 0, reductionDb: null, outcome: "PENDING" }); transition(nodePaired ? "READY" : "UNPAIRED", "test cell reset"); }} className="btn btn-ghost btn-xs"><RotateCcw size={12} /> Reset</button></footer>
   </main>;
 };
