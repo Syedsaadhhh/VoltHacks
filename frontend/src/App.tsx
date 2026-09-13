@@ -4,6 +4,7 @@ import { OperatorCell } from "./routes/OperatorCell";
 import { NodeView } from "./routes/NodeView";
 import { MethodologyView } from "./routes/MethodologyView";
 import { ProofView } from "./routes/ProofView";
+import { warmBackend } from "./backend";
 
 export const App: React.FC = () => {
   const [room, setRoom] = useState<string | null>(null);
@@ -12,11 +13,16 @@ export const App: React.FC = () => {
   const [page, setPage] = useState<"opening" | "cell" | "node" | "proof" | "methodology">("opening");
 
   useEffect(() => {
+    warmBackend();
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get("room");
     const roleParam = params.get("role");
+    const proofParam = params.get("proof");
+    const pageParam = params.get("page");
     const parts = window.location.pathname.split("/").filter(Boolean);
 
+    if (pageParam === "methodology") { setPage("methodology"); return; }
+    if (proofParam) { setRoom(proofParam); setPage("proof"); return; }
     if (parts[0] === "methodology") { setPage("methodology"); return; }
     if (parts[0] === "proof") { setRoom(parts[1] || "latest"); setPage("proof"); return; }
     if (parts[0] === "node" && parts[1]) { setRoom(parts[1]); setRole("node"); setPage("node"); return; }
@@ -26,6 +32,7 @@ export const App: React.FC = () => {
 
     if (roomParam) {
       setRoom(roomParam);
+      setIsReplay(params.get("source") === "replay");
       if (roleParam === "node") {
         setRole("node");
         setPage("node");
@@ -41,7 +48,7 @@ export const App: React.FC = () => {
     setRole("operator");
     setIsReplay(replay);
     setPage("cell");
-    window.history.pushState({}, "", `/cell/${encodeURIComponent(roomId)}${replay ? "?source=replay" : ""}`);
+    window.history.pushState({}, "", `/?room=${encodeURIComponent(roomId)}${replay ? "&source=replay" : ""}`);
   };
 
   if (page === "methodology") return <MethodologyView />;

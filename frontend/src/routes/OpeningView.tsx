@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Play, RotateCcw, ShieldCheck, Activity, Radio, Cpu } from "lucide-react";
+import { apiUrl } from "../backend";
 
 interface Props {
   onStartRoom: (roomId: string, isReplay: boolean) => void;
@@ -13,7 +14,7 @@ export const OpeningView: React.FC<Props> = ({ onStartRoom }) => {
     try {
       setLoading(true);
       setError(null);
-      const res = await fetch("/api/rooms", { method: "POST" });
+      const res = await fetch(apiUrl("/api/rooms"), { method: "POST" });
       if (!res.ok) throw new Error("Failed to create room on server");
       const data = await res.json();
       onStartRoom(data.room_id, false);
