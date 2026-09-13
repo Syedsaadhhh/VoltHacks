@@ -18,6 +18,7 @@ import {
   WebSocketMessage,
   CommandAckMessage,
 } from "../protocol/types";
+import { websocketUrl } from "../backend";
 
 interface Props {
   roomCode: string;
@@ -56,8 +57,7 @@ export const OperatorView: React.FC<Props> = ({ roomCode, initialReplay = false 
   };
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/${roomCode}`;
+    const wsUrl = websocketUrl(`/ws/${roomCode}`);
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
